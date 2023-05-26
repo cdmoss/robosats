@@ -44,7 +44,7 @@ reboot
 
 ## Create Emulator (or connect Android phone and install adb)
 
-Use the GUI of Android studio to create a new virtual devide. As of 23/06/2022 we are using a Pixel 5 as template and System image R API level 30 Android 11.0
+Use the GUI of Android studio to create a new virtual device. As of 26/03/2023 we are using a Pixel 5 as template and System image Tiramisu API level 33
 
 If using a phone, start the USB debugging mode.
 
