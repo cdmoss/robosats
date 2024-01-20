@@ -49,14 +49,14 @@ Alice wants to buy satoshis privately:
 7. On a private chat, Bob tells Alice how to send him fiat.
 8. Alice pays Bob, then they confirm the fiat has been sent and received.
 9. Bob's trade hold invoice is charged and the satoshis are sent to Alice.
-10. Bob and Alice's bonds return automatically, since they complied by the rules.
+10. Bob and Alice's bonds return automatically, since they complied with the rules.
 11. The bonds would be charged (lost) in case of unilateral cancellation or cheating (lost dispute).
 
 ## Contribute to the Robotic Satoshis Open Source Project
 Check out our [Contribution Guide](https://learn.robosats.com/contribute/) to find how you can make RoboSats great.
 
 ### ⚡Developer Rewards ⚡
-Check out the [Developer Rewards Panel](https://github.com/users/RoboSats/projects/2/views/5) for tasks paid in Sats.
+Check out the [Developer Rewards Panel](https://github.com/users/Reckless-Satoshi/projects/2/views/5) for tasks paid in Sats.
 
 ## Sponsors
 <div align="center">
@@ -66,8 +66,9 @@ Check out the [Developer Rewards Panel](https://github.com/users/RoboSats/projec
 ## Reviews
 - **[Athena Alpha](https://www.athena-alpha.com/robosats-review/)**
 - **[Bitcoin Magazine](https://bitcoinmagazine.com/business/robosats-private-bitcoin-exchange)**
-- **[KYC? Not Me!](https://kycnot.me/exchange/robosats)**
+- **[KYC? Not Me!](https://kycnot.me/service/robosats)**
 - **[H17N Bitcoin](https://h17n.com/exchange/robosats/)**
+- **[blockdyor](https://blockdyor.com/robosats/)**
 
 ## Inspiration
 The concept of a simple custody-minimized lightning exchange with hold invoices is inspired in [P2PLNBOT](https://github.com/grunch/p2plnbot) by @grunch

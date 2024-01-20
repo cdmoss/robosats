@@ -1,9 +1,11 @@
 import textwrap
 
 from decouple import config
+from django.conf import settings
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter
 
 from api.serializers import (
+    InfoSerializer,
     ListOrderSerializer,
     OrderDetailSerializer,
     StealthSerializer,
@@ -11,9 +13,6 @@ from api.serializers import (
 
 EXP_MAKER_BOND_INVOICE = int(config("EXP_MAKER_BOND_INVOICE"))
 RETRY_TIME = int(config("RETRY_TIME"))
-PUBLIC_DURATION = 60 * 60 * int(config("DEFAULT_PUBLIC_ORDER_DURATION")) - 1
-ESCROW_DURATION = 60 * int(config("INVOICE_AND_ESCROW_DURATION"))
-BOND_SIZE = int(config("DEFAULT_BOND_SIZE"))
 
 
 class MakerViewSchema:
@@ -25,9 +24,9 @@ class MakerViewSchema:
 
 
             Default values for the following fields if not specified:
-            - `public_duration` - **{PUBLIC_DURATION}**
-            - `escrow_duration` - **{ESCROW_DURATION}**
-            - `bond_size` -  **{BOND_SIZE}**
+            - `public_duration` - **{settings.DEFAULT_PUBLIC_ORDER_DURATION}**
+            - `escrow_duration` - **{settings.INVOICE_AND_ESCROW_DURATION}**
+            - `bond_size` -  **{settings.DEFAULT_BOND_SIZE}**
             - `has_range` - **false**
             - `premium` - **0**
             """
@@ -205,7 +204,7 @@ class OrderViewSchema:
             Update an order
 
             `action` field is required and determines what is to be done. Below
-            is an explaination of what each action does:
+            is an explanation of what each action does:
 
             - `take`
               - If the order has not expired and is still public, on a
@@ -220,13 +219,14 @@ class OrderViewSchema:
             - `update_invoice`
               - This action only is valid if you are the buyer. The `invoice`
                 field needs to be present in the body and the value must be a
-                valid LN invoice. Make sure to perform this action only when
+                valid LN invoice as cleartext PGP message signed with the robot key. Make sure to perform this action only when
                 both the bonds are locked. i.e The status of your order is
-                atleast `6` (Waiting for trade collateral and buyer invoice)
+                at least `6` (Waiting for trade collateral and buyer invoice)
             - `update_address`
               - This action is only valid if you are the buyer. This action is
                 used to set an on-chain payout address if you wish to have your
-                payout be recieved on-chain. This enables on-chain swap for the
+                payout be received on-chain. Only valid if there is an address in the body as
+                cleartext PGP message signed with the robot key. This enables on-chain swap for the
                 order, so even if you earlier had submitted a LN invoice, it
                 will be ignored. You get to choose the `mining_fee_rate` as
                 well. Mining fee rate is specified in sats/vbyte.
@@ -237,7 +237,7 @@ class OrderViewSchema:
                 - `11` - In dispute
                 - `12` - Collaboratively cancelled
                 - `13` - Sending satoshis to buyer
-                - `14` - Sucessful trade
+                - `14` - Successful trade
                 - `15` - Failed lightning network routing
                 - `17` - Maker lost dispute
                 - `18` - Taker lost dispute
@@ -246,13 +246,13 @@ class OrderViewSchema:
                 mid-trade so use this action carefully:
 
                 - As a maker if you cancel an order after you have locked your
-                  maker bond, you are returend your bond. This may change in
+                  maker bond, you are returned your bond. This may change in
                   the future to prevent DDoSing the LN node and you won't be
-                  returend the maker bond.
+                  returned the maker bond.
                 - As a taker there is a time penalty involved if you `take` an
                   order and cancel it without locking the taker bond.
                 - For both taker or maker, if you cancel the order when both
-                  have locked thier bonds (status = `6` or `7`), you loose your
+                  have locked their bonds (status = `6` or `7`), you loose your
                   bond and a percent of it goes as "rewards" to your
                   counterparty and some of it the platform keeps. This is to
                   discourage wasting time and DDoSing the platform.
@@ -323,17 +323,7 @@ class OrderViewSchema:
             ),
         ],
         "responses": {
-            200: {
-                "type": "object",
-                "additionalProperties": {
-                    "oneOf": [
-                        {"type": "str"},
-                        {"type": "number"},
-                        {"type": "object"},
-                        {"type": "boolean"},
-                    ],
-                },
-            },
+            200: OrderDetailSerializer,
             400: {
                 "type": "object",
                 "properties": {
@@ -353,241 +343,6 @@ class OrderViewSchema:
                 status_codes=[400],
             ),
         ],
-    }
-
-
-class UserViewSchema:
-    post = {
-        "summary": "Create user",
-        "description": textwrap.dedent(
-            """
-            Create a new Robot 🤖
-
-            `token_sha256` is the SHA256 hash of your token. Make sure you generate your token
-            using cryptographically secure methods. [Here's]() the function the Javascript
-            client uses to generate the tokens. Since the server only recieves the hash of the
-            token, it trusts the client with computing `length`, `counts` and `unique_values`
-            correctly. Check [here](https://github.com/RoboSats/robosats/blob/main/frontend/src/utils/token.js#L13)
-            to see how the Javascript client copmutes these values. These values are optional,
-            but if provided, the api computes the entropy of the token adds two additional
-            fields to the response JSON - `token_shannon_entropy` and `token_bits_entropy`.
-
-            **Note: It is entirely the clients responsibilty to generate high entropy tokens, and the optional
-            parameters are provided to act as an aid to help determine sufficient entropy, but the server is happy
-            with just any sha256 hash you provide it**
-
-            `public_key` - PGP key associated with the user (Armored ASCII format)
-            `encrypted_private_key` - Private PGP key. This is only stored on the backend for later fetching by
-            the frontend and the key can't really be used by the server since it's protected by the token
-            that only the client knows. Will be made an optional parameter in a future release.
-            On the Javascript client, It's passphrase is set to be the secret token generated.
-
-            A gpg key can be created by:
-
-            ```shell
-            gpg --full-gen-key
-            ```
-
-            it's public key can be exported in ascii armored format with:
-
-            ```shell
-            gpg --export --armor <key-id | email | name>
-            ```
-
-            and it's private key can be exported in ascii armored format with:
-
-            ```shell
-            gpg --export-secret-keys --armor <key-id | email | name>
-            ```
-
-            """
-        ),
-        "responses": {
-            201: {
-                "type": "object",
-                "properties": {
-                    "encrypted_private_key": {
-                        "type": "string",
-                        "description": "Armored ASCII PGP private key block",
-                    },
-                    "nickname": {
-                        "type": "string",
-                        "description": "Username generated (Robot name)",
-                    },
-                    "public_key": {
-                        "type": "string",
-                        "description": "Armored ASCII PGP public key block",
-                    },
-                    "token_bits_entropy": {"type": "integer"},
-                    "token_shannon_entropy": {"type": "integer"},
-                    "wants_stealth": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Whether the user prefers stealth invoices",
-                    },
-                },
-            },
-            202: {
-                "type": "object",
-                "properties": {
-                    "encrypted_private_key": {
-                        "type": "string",
-                        "description": "Armored ASCII PGP private key block",
-                    },
-                    "nickname": {
-                        "type": "string",
-                        "description": "Username generated (Robot name)",
-                    },
-                    "public_key": {
-                        "type": "string",
-                        "description": "Armored ASCII PGP public key block",
-                    },
-                    "token_bits_entropy": {"type": "integer"},
-                    "token_shannon_entropy": {"type": "integer"},
-                    "wants_stealth": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Whether the user prefers stealth invoices",
-                    },
-                    "found": {"type": "string", "description": "Welcome back message"},
-                    "tg_enabled": {
-                        "type": "boolean",
-                        "description": "The robot has telegram notifications enabled",
-                    },
-                    "tg_token": {
-                        "type": "string",
-                        "description": "Token to enable telegram with /start <tg_token>",
-                    },
-                    "tg_bot_name": {
-                        "type": "string",
-                        "description": "Name of the coordinator's telegram bot",
-                    },
-                    "last_login": {
-                        "type": "string",
-                        "format": "date-time",
-                        "description": "Last time seen",
-                    },
-                    "active_order_id": {
-                        "type": "integer",
-                        "description": "Active order id if present",
-                    },
-                    "last_order_id": {
-                        "type": "integer",
-                        "description": "Last order id if present",
-                    },
-                },
-            },
-            400: {
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "active_order_id": {
-                                "type": "string",
-                                "description": "Order id the robot is a maker/taker of",
-                            },
-                            "nickname": {
-                                "type": "string",
-                                "description": "Username (Robot name)",
-                            },
-                            "bad_request": {
-                                "type": "string",
-                                "description": "Reason for the failure",
-                                "default": "You are already logged in as {nickname} and have an active order",
-                            },
-                        },
-                        "description": "Response when you already authenticated and have an order",
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "bad_request": {
-                                "type": "string",
-                                "description": "Reason for the failure",
-                            },
-                        },
-                    },
-                ]
-            },
-            403: {
-                "type": "object",
-                "properties": {
-                    "bad_request": {
-                        "type": "string",
-                        "description": "Reason for the failure",
-                        "default": "Enter a different token",
-                    },
-                    "found": {
-                        "type": "string",
-                        "default": "Bad luck, this nickname is taken",
-                    },
-                },
-            },
-        },
-        "examples": [
-            OpenApiExample(
-                "Successfuly created user",
-                value={
-                    "token_shannon_entropy": 0.7714559798089662,
-                    "token_bits_entropy": 169.21582985307933,
-                    "nickname": "StackerMan420",
-                    "public_key": "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n......\n......",
-                    "encrypted_private_key": "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n......\n......",
-                    "wants_stealth": False,
-                },
-                status_codes=[201],
-            ),
-            OpenApiExample(
-                "Already authenticated and have an order",
-                value={
-                    "active_order_id": "42069",
-                    "nickname": "StackerMan210",
-                    "bad_request": "You are already logged in as {nickname} and have an active order",
-                },
-                status_codes=[400],
-            ),
-            OpenApiExample(
-                "When required token entropy not met",
-                value={"bad_request": "The token does not have enough entropy"},
-                status_codes=[400],
-            ),
-            OpenApiExample(
-                "Invalid PGP public key provided",
-                value={"bad_request": "Your PGP public key does not seem valid"},
-                status_codes=[400],
-            ),
-        ],
-    }
-
-    delete = {
-        "summary": "Delete user",
-        "description": textwrap.dedent(
-            """
-            Delete a Robot. Deleting a robot is not allowed if the robot has an active order, has had completed trades or was created more than 30 mins ago.
-            Mainly used on the frontend to "Generate new Robot" without flooding the DB with discarded robots.
-            """
-        ),
-        "responses": {
-            403: {},
-            400: {
-                "type": "object",
-                "properties": {
-                    "bad_request": {
-                        "type": "string",
-                        "description": "Reason for the failure",
-                    },
-                },
-            },
-            301: {
-                "type": "object",
-                "properties": {
-                    "user_deleted": {
-                        "type": "string",
-                        "default": "User deleted permanently",
-                    },
-                },
-            },
-        },
     }
 
 
@@ -627,8 +382,6 @@ class RobotViewSchema:
         "summary": "Get robot info",
         "description": textwrap.dedent(
             """
-            DEPRECATED: Use `/robot` GET.
-
             Get robot info 🤖
 
             An authenticated request (has the token's sha256 hash encoded as base 91 in the Authorization header) will be
@@ -679,6 +432,10 @@ class RobotViewSchema:
                         "type": "string",
                         "description": "Username generated (Robot name)",
                     },
+                    "hash_id": {
+                        "type": "string",
+                        "description": "The hash identity of the robot, it is used to deterministically generate the avatar and the nicknames. It is the second sha256() of the token.",
+                    },
                     "public_key": {
                         "type": "string",
                         "description": "Armored ASCII PGP public key block",
@@ -711,6 +468,16 @@ class RobotViewSchema:
                     "last_order_id": {
                         "type": "integer",
                         "description": "Last order id if present",
+                    },
+                    "earned_rewards": {
+                        "type": "integer",
+                        "description": "Satoshis available to be claimed",
+                    },
+                    "last_login": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": True,
+                        "description": "Last time the coordinator saw this robot",
                     },
                 },
             },
@@ -755,13 +522,16 @@ class InfoViewSchema:
               - on-chain swap fees
             """
         ),
+        "responses": {
+            200: InfoSerializer,
+        },
     }
 
 
 class RewardViewSchema:
     post = {
         "summary": "Withdraw reward",
-        "description": "Withdraw user reward by submitting an invoice",
+        "description": "Withdraw user reward by submitting an invoice. The invoice must be send as cleartext PGP message signed with the robot key",
         "responses": {
             200: {
                 "type": "object",
@@ -869,6 +639,31 @@ class TickViewSchema:
         "description": "Get all market ticks. Returns a list of all the market ticks since inception.\n"
         "CEX price is also recorded for useful insight on the historical premium of Non-KYC BTC. "
         "Price is set when taker bond is locked.",
+        "parameters": [
+            OpenApiParameter(
+                name="start",
+                location=OpenApiParameter.QUERY,
+                description="Start date formatted as DD-MM-YYYY",
+                required=False,
+                type=str,
+            ),
+            OpenApiParameter(
+                name="end",
+                location=OpenApiParameter.QUERY,
+                description="End date formatted as DD-MM-YYYY",
+                required=False,
+                type=str,
+            ),
+        ],
+        "examples": [
+            OpenApiExample(
+                "Too many ticks",
+                value={
+                    "bad_request": "More than 5000 market ticks have been found. Try narrowing the date range."
+                },
+                status_codes=[400],
+            )
+        ],
     }
 
 
@@ -927,11 +722,11 @@ class HistoricalViewSchema:
                     "type": "object",
                     "properties": {
                         "volume": {
-                            "type": "integer",
+                            "type": "number",
                             "description": "Total Volume traded on that particular date",
                         },
                         "num_contracts": {
-                            "type": "number",
+                            "type": "integer",
                             "description": "Number of successful trades on that particular date",
                         },
                     },
@@ -943,10 +738,8 @@ class HistoricalViewSchema:
                 "Truncated example",
                 value={
                     "<date>": {
-                        "code": "USD",
-                        "price": "42069.69",
-                        "min_amount": "4.2",
-                        "max_amount": "420.69",
+                        "volume": 0.69,
+                        "num_contracts": 69,
                     },
                 },
                 status_codes=[200],

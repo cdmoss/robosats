@@ -1,26 +1,18 @@
-import hashlib
 from datetime import datetime, timedelta
-from math import log2
 from pathlib import Path
 
 from decouple import config
 from django.conf import settings
-from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db.models import Q, Sum
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
-from rest_framework.authentication import (
-    SessionAuthentication,  # DEPRECATE session authentication
-)
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.generics import CreateAPIView, ListAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from robohash import Robohash
-from scipy.stats import entropy
 
 from api.logics import Logics
 from api.models import Currency, LNPayment, MarketTick, OnchainPayment, Order
@@ -37,7 +29,6 @@ from api.oas_schemas import (
     RobotViewSchema,
     StealthViewSchema,
     TickViewSchema,
-    UserViewSchema,
 )
 from api.serializers import (
     ClaimRewardSerializer,
@@ -49,7 +40,6 @@ from api.serializers import (
     StealthSerializer,
     TickSerializer,
     UpdateOrderSerializer,
-    UserGenSerializer,
 )
 from api.utils import (
     compute_avg_premium,
@@ -57,34 +47,25 @@ from api.utils import (
     get_cln_version,
     get_lnd_version,
     get_robosats_commit,
-    validate_pgp_keys,
     verify_signed_message,
 )
 from chat.models import Message
 from control.models import AccountingDay, BalanceLog
 
-from .nick_generator.nick_generator import NickGenerator
-
 EXP_MAKER_BOND_INVOICE = int(config("EXP_MAKER_BOND_INVOICE"))
 RETRY_TIME = int(config("RETRY_TIME"))
-PUBLIC_DURATION = 60 * 60 * int(config("DEFAULT_PUBLIC_ORDER_DURATION")) - 1
-ESCROW_DURATION = 60 * int(config("INVOICE_AND_ESCROW_DURATION"))
-BOND_SIZE = int(config("DEFAULT_BOND_SIZE"))
 
 avatar_path = Path(settings.AVATAR_ROOT)
 avatar_path.mkdir(parents=True, exist_ok=True)
 
-# Create your views here.
-
 
 class MakerView(CreateAPIView):
     serializer_class = MakeOrderSerializer
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
     @extend_schema(**MakerViewSchema.post)
     def post(self, request):
-
         serializer = self.serializer_class(data=request.data)
 
         if not request.user.is_authenticated:
@@ -102,7 +83,7 @@ class MakerView(CreateAPIView):
         ):
             return Response(
                 {
-                    "bad_request": "Woah! RoboSats' book is at full capacity! Try again later"
+                    "bad_request": f"The RoboSats {config('COORDINATOR_ALIAS', cast=str, default='NoAlias')} coordinator book is at full capacity! Current limit is {config('MAX_PUBLIC_ORDERS', cast=str)} orders"
                 },
                 status.HTTP_400_BAD_REQUEST,
             )
@@ -124,18 +105,18 @@ class MakerView(CreateAPIView):
         public_duration = serializer.data.get("public_duration")
         escrow_duration = serializer.data.get("escrow_duration")
         bond_size = serializer.data.get("bond_size")
+        latitude = serializer.data.get("latitude")
+        longitude = serializer.data.get("longitude")
 
         # Optional params
         if public_duration is None:
-            public_duration = PUBLIC_DURATION
+            public_duration = 60 * 60 * settings.DEFAULT_PUBLIC_ORDER_DURATION
         if escrow_duration is None:
-            escrow_duration = ESCROW_DURATION
+            escrow_duration = 60 * settings.INVOICE_AND_ESCROW_DURATION
         if bond_size is None:
-            bond_size = BOND_SIZE
+            bond_size = settings.DEFAULT_BOND_SIZE
         if has_range is None:
             has_range = False
-
-        # TODO add a check - if `is_explicit` is true then `satoshis` need to be specified
 
         # An order can either have an amount or a range (min_amount and max_amount)
         if has_range:
@@ -175,6 +156,8 @@ class MakerView(CreateAPIView):
             public_duration=public_duration,
             escrow_duration=escrow_duration,
             bond_size=bond_size,
+            latitude=latitude,
+            longitude=longitude,
         )
 
         order.last_satoshis = order.t0_satoshis = Logics.satoshis_now(order)
@@ -184,11 +167,14 @@ class MakerView(CreateAPIView):
             return Response(context, status.HTTP_400_BAD_REQUEST)
 
         order.save()
+        order.log(
+            f"Order({order.id},{order}) created by Robot({request.user.robot.id},{request.user})"
+        )
         return Response(ListOrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 
 class OrderView(viewsets.ViewSet):
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
     serializer_class = UpdateOrderSerializer
     lookup_url_kwarg = "order_id"
@@ -258,6 +244,7 @@ class OrderView(viewsets.ViewSet):
             )
 
         data["maker_nick"] = str(order.maker)
+        data["maker_hash_id"] = str(order.maker.robot.hash_id)
 
         # Add activity status of participants based on last_seen
         data["maker_status"] = Logics.user_activity_status(order.maker.last_login)
@@ -292,8 +279,12 @@ class OrderView(viewsets.ViewSet):
         data["is_buyer"] = Logics.is_buyer(order, request.user)
         data["is_seller"] = Logics.is_seller(order, request.user)
         data["taker_nick"] = str(order.taker)
+        if order.taker:
+            data["taker_hash_id"] = str(order.taker.robot.hash_id)
         data["status_message"] = Order.Status(order.status).label
         data["is_fiat_sent"] = order.is_fiat_sent
+        data["latitude"] = order.latitude
+        data["longitude"] = order.longitude
         data["is_disputed"] = order.is_disputed
         data["ur_nick"] = request.user.username
         data["satoshis_now"] = order.last_satoshis
@@ -318,7 +309,17 @@ class OrderView(viewsets.ViewSet):
             data["escrow_locked"] = False
 
         # If both bonds are locked, participants can see the final trade amount in sats.
-        if order.taker_bond:
+        if order.status in [
+            Order.Status.WF2,
+            Order.Status.WFI,
+            Order.Status.WFE,
+            Order.Status.CCA,
+            Order.Status.FSE,
+            Order.Status.DIS,
+            Order.Status.PAY,
+            Order.Status.SUC,
+            Order.Status.FAI,
+        ]:
             if (
                 order.maker_bond.status
                 == order.taker_bond.status
@@ -371,7 +372,6 @@ class OrderView(viewsets.ViewSet):
         elif data["is_buyer"] and (
             order.status == Order.Status.WF2 or order.status == Order.Status.WFI
         ):
-
             # If the two bonds are locked, reply with an AMOUNT and onchain swap cost so he can send the buyer invoice/address.
             if (
                 order.maker_bond.status
@@ -414,7 +414,6 @@ class OrderView(viewsets.ViewSet):
 
         # 9) If status is 'DIS' and all HTLCS are in LOCKED
         elif order.status == Order.Status.DIS:
-
             # add whether the dispute statement has been received
             if data["is_maker"]:
                 data["statement_submitted"] = (
@@ -453,7 +452,7 @@ class OrderView(viewsets.ViewSet):
             Order.Status.FAI,
         ]:
             data["public_duration"] = order.public_duration
-            data["bond_size"] = order.bond_size
+            data["bond_size"] = str(order.bond_size)
 
             # Adds trade summary
             if order.status in [Order.Status.SUC, Order.Status.PAY, Order.Status.FAI]:
@@ -547,14 +546,9 @@ class OrderView(viewsets.ViewSet):
         # 2) If action is 'update invoice'
         elif action == "update_invoice":
             # DEPRECATE post v0.5.1.
-            if "---" not in pgp_invoice:
-                valid_signature = True
-                invoice = pgp_invoice
-            else:
-                # END DEPRECATE.
-                valid_signature, invoice = verify_signed_message(
-                    request.user.robot.public_key, pgp_invoice
-                )
+            valid_signature, invoice = verify_signed_message(
+                request.user.robot.public_key, pgp_invoice
+            )
 
             if not valid_signature:
                 return Response(
@@ -570,15 +564,9 @@ class OrderView(viewsets.ViewSet):
 
         # 2.b) If action is 'update address'
         elif action == "update_address":
-            # DEPRECATE post v0.5.1.
-            if "---" not in pgp_address:
-                valid_signature = True
-                address = pgp_address
-            else:
-                # END DEPRECATE.
-                valid_signature, address = verify_signed_message(
-                    request.user.robot.public_key, pgp_address
-                )
+            valid_signature, address = verify_signed_message(
+                request.user.robot.public_key, pgp_address
+            )
 
             if not valid_signature:
                 return Response(
@@ -652,7 +640,7 @@ class OrderView(viewsets.ViewSet):
 
 
 class RobotView(APIView):
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
     @extend_schema(**RobotViewSchema.get)
@@ -663,6 +651,7 @@ class RobotView(APIView):
         user = request.user
         context = {}
         context["nickname"] = user.username
+        context["hash_id"] = user.robot.hash_id
         context["public_key"] = user.robot.public_key
         context["encrypted_private_key"] = user.robot.encrypted_private_key
         context["earned_rewards"] = user.robot.earned_rewards
@@ -690,208 +679,6 @@ class RobotView(APIView):
             context["found"] = True
 
         return Response(context, status=status.HTTP_200_OK)
-
-
-class UserView(APIView):
-    """
-    Deprecated. UserView will be completely replaced by the smaller RobotView in
-    combination with the RobotTokenSHA256 middleware (on-the-fly robot generation)
-    """
-
-    NickGen = NickGenerator(
-        lang="English", use_adv=False, use_adj=True, use_noun=True, max_num=999
-    )
-
-    serializer_class = UserGenSerializer
-
-    @extend_schema(**UserViewSchema.post)
-    def post(self, request, format=None):
-        """
-        Get a new user derived from a high entropy token
-
-        - Request has a hash of a high-entropy token
-        - Request includes pubKey and encrypted privKey
-        - Generates new nickname and avatar.
-        - Creates login credentials (new User object)
-
-        Response with Avatar, Nickname, pubKey, privKey.
-        """
-        context = {}
-        serializer = self.serializer_class(data=request.data)
-
-        # Return bad request if serializer is not valid
-        if not serializer.is_valid():
-            context = {"bad_request": "Invalid serializer"}
-            return Response(context, status=status.HTTP_400_BAD_REQUEST)
-
-        # The new way. The token is never sent. Only its SHA256
-        token_sha256 = serializer.data.get("token_sha256")
-        public_key = serializer.data.get("public_key")
-        encrypted_private_key = serializer.data.get("encrypted_private_key")
-
-        # Now the server only receives a hash of the token. So server trusts the client
-        # with computing length, counts and unique_values to confirm the high entropy of the token
-        # In any case, it is up to the client if they want to create a bad high entropy token.
-
-        # Submitting the three params needed to compute token entropy is not mandatory
-        # If not submitted, avatars can be created with garbage entropy token. Frontend will always submit them.
-        try:
-            unique_values = serializer.data.get("unique_values")
-            counts = serializer.data.get("counts")
-            length = serializer.data.get("length")
-
-            shannon_entropy = entropy(counts, base=62)
-            bits_entropy = log2(unique_values**length)
-
-            # Payload
-            context = {
-                "token_shannon_entropy": shannon_entropy,
-                "token_bits_entropy": bits_entropy,
-            }
-
-            # Deny user gen if entropy below 128 bits or 0.7 shannon heterogeneity
-            if bits_entropy < 128 or shannon_entropy < 0.7:
-                context["bad_request"] = "The token does not have enough entropy"
-                return Response(context, status=status.HTTP_400_BAD_REQUEST)
-        except Exception:
-            pass
-
-        # Hash the token_sha256, only 1 iteration. (this is the second SHA256 of the user token, aka RoboSats ID)
-        hash = hashlib.sha256(token_sha256.encode("utf-8")).hexdigest()
-
-        # Generate nickname deterministically
-        nickname = self.NickGen.short_from_SHA256(hash, max_length=18)[0]
-        context["nickname"] = nickname
-
-        # Generate avatar
-        rh = Robohash(hash)
-        rh.assemble(roboset="set1", bgset="any")  # for backgrounds ON
-
-        # Does not replace image if existing (avoid re-avatar in case of nick collusion)
-        # Deprecate "png" and keep "webp" only after v0.4.4
-        image_path = avatar_path.joinpath(nickname + ".webp")
-        if not image_path.exists():
-            with open(image_path, "wb") as f:
-                rh.img.save(f, format="WEBP", quality=80)
-
-            image_small_path = avatar_path.joinpath(nickname + ".small.webp")
-            with open(image_small_path, "wb") as f:
-                resized_img = rh.img.resize((80, 80))
-                resized_img.save(f, format="WEBP", quality=80)
-
-            png_path = avatar_path.joinpath(nickname + ".png")
-            with open(png_path, "wb") as f:
-                rh.img.save(f, format="png", optimize=True)
-
-        # Create new credentials and login if nickname is new
-        if len(User.objects.filter(username=nickname)) == 0:
-            if not public_key or not encrypted_private_key:
-                context[
-                    "bad_request"
-                ] = "Must provide valid 'pub' and 'enc_priv' PGP keys"
-                return Response(context, status.HTTP_400_BAD_REQUEST)
-            (
-                valid,
-                bad_keys_context,
-                public_key,
-                encrypted_private_key,
-            ) = validate_pgp_keys(public_key, encrypted_private_key)
-            if not valid:
-                return Response(bad_keys_context, status.HTTP_400_BAD_REQUEST)
-
-            User.objects.create_user(
-                username=nickname, password=token_sha256, is_staff=False
-            )
-            user = authenticate(request, username=nickname, password=token_sha256)
-            login(request, user)
-
-            user.robot.avatar = "static/assets/avatars/" + nickname + ".webp"
-
-            # Noticed some PGP keys replaced at re-login. Should not happen.
-            # Let's implement this sanity check "If robot has not keys..."
-            if not user.robot.public_key:
-                user.robot.public_key = public_key
-            if not user.robot.encrypted_private_key:
-                user.robot.encrypted_private_key = encrypted_private_key
-
-            user.robot.save()
-
-            context = {**context, **Telegram.get_context(user)}
-            context["public_key"] = user.robot.public_key
-            context["encrypted_private_key"] = user.robot.encrypted_private_key
-            context["wants_stealth"] = user.robot.wants_stealth
-            return Response(context, status=status.HTTP_201_CREATED)
-
-        # log in user and return pub/priv keys if existing
-        else:
-            user = authenticate(request, username=nickname, password=token_sha256)
-            if user is not None:
-                login(request, user)
-                context["public_key"] = user.robot.public_key
-                context["encrypted_private_key"] = user.robot.encrypted_private_key
-                context["earned_rewards"] = user.robot.earned_rewards
-                context["wants_stealth"] = user.robot.wants_stealth
-
-                # Adds/generate telegram token and whether it is enabled
-                context = {**context, **Telegram.get_context(user)}
-
-                # return active order or last made order if any
-                has_no_active_order, _, order = Logics.validate_already_maker_or_taker(
-                    request.user
-                )
-                if not has_no_active_order:
-                    context["active_order_id"] = order.id
-                else:
-                    last_order = Order.objects.filter(
-                        Q(maker=request.user) | Q(taker=request.user)
-                    ).last()
-                    if last_order:
-                        context["last_order_id"] = last_order.id
-
-                # Sends the welcome back message.
-                context["found"] = "We found your Robot avatar. Welcome back!"
-                return Response(context, status=status.HTTP_202_ACCEPTED)
-            else:
-                # It is unlikely, but maybe the nickname is taken (1 in 20 Billion chance)
-                context["found"] = "Bad luck, this nickname is taken"
-                context["bad_request"] = "Enter a different token"
-                return Response(context, status.HTTP_403_FORBIDDEN)
-
-    @extend_schema(**UserViewSchema.delete)
-    def delete(self, request):
-        """Pressing "give me another" deletes the logged in user"""
-        user = request.user
-        if not user.is_authenticated:
-            return Response(status.HTTP_403_FORBIDDEN)
-
-        # Only delete if user life is shorter than 30 minutes. Helps to avoid deleting users by mistake
-        if user.date_joined < (timezone.now() - timedelta(minutes=30)):
-            return Response(status.HTTP_400_BAD_REQUEST)
-
-        # Check if it is not a maker or taker!
-        not_participant, _, _ = Logics.validate_already_maker_or_taker(user)
-        if not not_participant:
-            return Response(
-                {
-                    "bad_request": "Maybe a mistake? User cannot be deleted while he is part of an order"
-                },
-                status.HTTP_400_BAD_REQUEST,
-            )
-        # Check if has already a robot with
-        if user.robot.total_contracts > 0:
-            return Response(
-                {
-                    "bad_request": "Maybe a mistake? User cannot be deleted as it has completed trades"
-                },
-                status.HTTP_400_BAD_REQUEST,
-            )
-
-        logout(request)
-        user.delete()
-        return Response(
-            {"user_deleted": "User deleted permanently"},
-            status.HTTP_301_MOVED_PERMANENTLY,
-        )
 
 
 class BookView(ListAPIView):
@@ -925,10 +712,12 @@ class BookView(ListAPIView):
         for order in queryset:
             data = ListOrderSerializer(order).data
             data["maker_nick"] = str(order.maker)
+            data["maker_hash_id"] = str(order.maker.robot.hash_id)
 
             data["satoshis_now"] = Logics.satoshis_now(order)
             # Compute current premium for those orders that are explicitly priced.
-            data["price"], data["premium"] = Logics.price_and_premium_now(order)
+            price, premium = Logics.price_and_premium_now(order)
+            data["price"], data["premium"] = price, str(premium)
             data["maker_status"] = Logics.user_activity_status(order.maker.last_login)
             for key in (
                 "status",
@@ -941,8 +730,7 @@ class BookView(ListAPIView):
         return Response(book_data, status=status.HTTP_200_OK)
 
 
-class InfoView(ListAPIView):
-
+class InfoView(viewsets.ViewSet):
     serializer_class = InfoSerializer
 
     @extend_schema(**InfoViewSchema.get)
@@ -983,7 +771,7 @@ class InfoView(ListAPIView):
         if not len(queryset) == 0:
             volume_contracted = []
             for tick in queryset:
-                volume_contracted.append(tick.volume)
+                volume_contracted.append(tick.volume if tick.volume else 0)
             lifetime_volume = sum(volume_contracted)
         else:
             lifetime_volume = 0
@@ -1004,7 +792,9 @@ class InfoView(ListAPIView):
         context["taker_fee"] = float(config("FEE")) * (
             1 - float(config("MAKER_FEE_SPLIT"))
         )
-        context["bond_size"] = float(config("DEFAULT_BOND_SIZE"))
+        context["bond_size"] = settings.DEFAULT_BOND_SIZE
+        context["notice_severity"] = config("NOTICE_SEVERITY", cast=str, default="none")
+        context["notice_message"] = config("NOTICE_MESSAGE", cast=str, default="")
 
         try:
             context["current_swap_fee_rate"] = Logics.compute_swap_fee_rate(
@@ -1017,7 +807,7 @@ class InfoView(ListAPIView):
 
 
 class RewardView(CreateAPIView):
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
     serializer_class = ClaimRewardSerializer
@@ -1031,15 +821,9 @@ class RewardView(CreateAPIView):
 
         pgp_invoice = serializer.data.get("invoice")
 
-        # DEPRECATE post v0.5.1.
-        if "---" not in pgp_invoice:
-            valid_signature = True
-            invoice = pgp_invoice
-        else:
-            # END DEPRECATE.
-            valid_signature, invoice = verify_signed_message(
-                request.user.robot.public_key, pgp_invoice
-            )
+        valid_signature, invoice = verify_signed_message(
+            request.user.robot.public_key, pgp_invoice
+        )
 
         if not valid_signature:
             return Response(
@@ -1057,12 +841,10 @@ class RewardView(CreateAPIView):
 
 
 class PriceView(ListAPIView):
-
     serializer_class = PriceSerializer
 
     @extend_schema(**PriceViewSchema.get)
     def get(self, request):
-
         payload = {}
         queryset = Currency.objects.all().order_by("currency")
 
@@ -1085,25 +867,53 @@ class PriceView(ListAPIView):
 
 
 class TickView(ListAPIView):
-
     queryset = MarketTick.objects.all()
     serializer_class = TickSerializer
 
     @extend_schema(**TickViewSchema.get)
     def get(self, request):
-        data = self.serializer_class(
-            self.queryset.all(), many=True, read_only=True
-        ).data
+        start_date_str = request.query_params.get("start")
+        end_date_str = request.query_params.get("end")
+
+        # Perform the query with date range filtering
+        try:
+            if start_date_str:
+                naive_start_date = datetime.strptime(start_date_str, "%d-%m-%Y")
+                aware_start_date = timezone.make_aware(
+                    naive_start_date, timezone=timezone.get_current_timezone()
+                )
+                self.queryset = self.queryset.filter(timestamp__gte=aware_start_date)
+            if end_date_str:
+                naive_end_date = datetime.strptime(end_date_str, "%d-%m-%Y")
+                aware_end_date = timezone.make_aware(
+                    naive_end_date, timezone=timezone.get_current_timezone()
+                )
+                self.queryset = self.queryset.filter(timestamp__lte=aware_end_date)
+        except ValueError:
+            return Response(
+                {"bad_request": "Invalid date format"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check if the number of ticks exceeds the limit
+        if self.queryset.count() > 5000:
+            return Response(
+                {
+                    "bad_request": "More than 5000 market ticks have been found. Please, narrow the date range"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data = self.serializer_class(self.queryset, many=True, read_only=True).data
         return Response(data, status=status.HTTP_200_OK)
 
 
 class LimitView(ListAPIView):
     @extend_schema(**LimitViewSchema.get)
     def get(self, request):
-
         # Trade limits as BTC
-        min_trade = float(config("MIN_TRADE")) / 100_000_000
-        max_trade = float(config("MAX_TRADE")) / 100_000_000
+        min_trade = config("MIN_ORDER_SIZE", cast=int, default=20_000) / 100_000_000
+        max_trade = config("MAX_ORDER_SIZE", cast=int, default=500_000) / 100_000_000
 
         payload = {}
         queryset = Currency.objects.all().order_by("currency")
@@ -1137,7 +947,7 @@ class HistoricalView(ListAPIView):
 
 
 class StealthView(APIView):
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
     serializer_class = StealthSerializer

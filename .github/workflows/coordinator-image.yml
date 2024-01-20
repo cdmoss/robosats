@@ -13,11 +13,11 @@ jobs:
     name: 'Push Docker image to Docker Hub'
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: 'Download Basic main.js Artifact'
       if: inputs.semver == ''  # Only if workflow fired from frontend-build.yml
-      uses: dawidd6/action-download-artifact@v2
+      uses: dawidd6/action-download-artifact@v3
       with:
         workflow: frontend-build.yml
         workflow_conclusion: success
@@ -26,14 +26,14 @@ jobs:
 
     - name: 'Download Basic main.js Artifact for a release'
       if: inputs.semver != ''  # Only if fired as job in release.yml
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: web-main-js
         path: frontend/static/frontend/
 
     - name: 'Download pro.js Artifact'
       if: inputs.semver == ''  # Only if workflow fired from frontend-build.yml
-      uses: dawidd6/action-download-artifact@v2
+      uses: dawidd6/action-download-artifact@v3
       with:
         workflow: frontend-build.yml
         workflow_conclusion: success
@@ -42,20 +42,20 @@ jobs:
 
     - name: 'Download pro.js Artifact for a release'
       if: inputs.semver != ''  # Only if fired as job in release.yml
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: web-pro-js
         path: frontend/static/frontend/
 
     - name: 'Log in to Docker Hub'
-      uses: docker/login-action@v2
+      uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
     - name: 'Extract metadata (tags, labels) for Docker'
       id: meta
-      uses: docker/metadata-action@v4
+      uses: docker/metadata-action@v5
       with:
         images: recksato/robosats
         tags: |
@@ -67,7 +67,7 @@ jobs:
 
     - name: 'Get Commit Hash'
       id: commit
-      uses: pr-mpt/actions-commit-hash@v2
+      uses: pr-mpt/actions-commit-hash@v3
 
     - name: 'Save Commit Long Hash to TXT File'
       run: |
@@ -75,7 +75,7 @@ jobs:
         echo ${{ steps.commit.outputs.long }}>"commit_sha"
 
     - name: 'Build and push Docker image'
-      uses: docker/build-push-action@v4
+      uses: docker/build-push-action@v5
       with:
         context: .
         push: true

@@ -84,6 +84,7 @@ export const closeAll = {
   client: false,
   update: false,
   profile: false,
+  notice: false,
 };
 
 const makeTheme = function (settings: Settings) {
@@ -382,8 +383,8 @@ export const useAppStore = () => {
             data.active_order_id
               ? data.active_order_id
               : data.last_order_id
-              ? data.last_order_id
-              : null,
+                ? data.last_order_id
+                : null,
           );
         }
         setRobot(newRobot);

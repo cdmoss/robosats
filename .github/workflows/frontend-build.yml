@@ -28,9 +28,9 @@ jobs:
 
     steps:
     - name: 'Checkout'
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: 'Setup node'
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
         node-version: 16.17.0
         cache: npm
@@ -46,20 +46,39 @@ jobs:
         npm test
     - name:  'Build'
       run: |
+        export NODE_OPTIONS="--max-old-space-size=4096"
         cd frontend
         npm run build
     - name: 'Archive Web Basic Build Results'
-      uses: actions/upload-artifact@v3.1.2
+      uses: actions/upload-artifact@v4
       with:
         name: web-main-js
-        path: frontend/static/frontend/main.js
+        path: |
+          frontend/static/frontend/*main.js
+          frontend/static/frontend/*.wasm
+    - name: 'Archive Web Basic Selfhosted Build Results'
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-basic-selfhosted-js
+        path: |
+          frontend/static/frontend/*basic.selfhosted.js
+          frontend/static/frontend/*.wasm
     - name: 'Archive Web PRO Build Results'
-      uses: actions/upload-artifact@v3.1.2
+      uses: actions/upload-artifact@v4
       with:
         name: web-pro-js
-        path: frontend/static/frontend/pro.js
+        path: |
+          frontend/static/frontend/*pro.js
+          frontend/static/frontend/*.wasm
+    - name: 'Archive Web PRO SelhostedBuild Results'
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-pro-selfhosted-js
+        path: |
+          frontend/static/frontend/*pro.selfhosted.js
+          frontend/static/frontend/*.wasm
     - name: 'Archive Mobile Build Results'
-      uses: actions/upload-artifact@v3.1.2
+      uses: actions/upload-artifact@v4
       with:
         name: mobile-web.bundle
         path: mobile/html/Web.bundle
@@ -72,9 +91,15 @@ jobs:
       with:
         workflow: 'Docker: Coordinator'
         token: ${{ secrets.PERSONAL_TOKEN }}
-    - name: 'Invoke Client App Build CI/CD workflow'
+    - name: 'Invoke Selfhosted Client App Build CI/CD workflow'
       if: inputs.semver == ''
       uses: benc-uk/workflow-dispatch@v121
       with:
-        workflow: 'Docker: Client'
+        workflow: 'Docker: Selfhosted Client'
+        token: ${{ secrets.PERSONAL_TOKEN }}
+    - name: 'Invoke Web Client App Build CI/CD workflow'
+      if: inputs.semver == ''
+      uses: benc-uk/workflow-dispatch@v121
+      with:
+        workflow: 'Docker: Web Client'
         token: ${{ secrets.PERSONAL_TOKEN }}

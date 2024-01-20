@@ -31,48 +31,26 @@ const configWeb: Configuration = {
   },
 };
 
-const configMobile: Configuration = {
+const configWebSelfhosted: Configuration = {
   ...config,
   module: {
     ...config.module,
     rules: [
       ...(config?.module?.rules || []),
       {
-        test: path.resolve(__dirname, 'src/i18n/Web.js'),
+        test: path.resolve(__dirname, 'src/models/Settings.default.basic.ts'),
         loader: 'file-replace-loader',
         options: {
           condition: 'if-replacement-exists',
-          replacement: path.resolve(__dirname, 'src/i18n/Native.js'),
-          async: true,
-        },
-      },
-      {
-        test: path.resolve(__dirname, 'src/components/RobotAvatar/placeholder.json'),
-        loader: 'file-replace-loader',
-        options: {
-          condition: 'if-replacement-exists',
-          replacement: path.resolve(
-            __dirname,
-            'src/components/RobotAvatar/placeholder_highres.json',
-          ),
+          replacement: path.resolve(__dirname, 'src/models/Settings.default.basic.selfhosted.ts'),
           async: true,
         },
       },
     ],
   },
-  plugins: [
-    new CopyPlugin({
-      patterns: [
-        {
-          from: path.resolve(__dirname, 'static/css'),
-          to: path.resolve(__dirname, '../mobile/html/Web.bundle/css'),
-        },
-      ],
-    }),
-  ],
   output: {
-    path: path.resolve(__dirname, '../mobile/html/Web.bundle/js'),
-    filename: 'main.js',
+    path: path.resolve(__dirname, 'static/frontend'),
+    filename: 'basic.selfhosted.js',
   },
 };
 
@@ -108,4 +86,94 @@ const configWebPro: Configuration = {
   },
 };
 
-export default [configWeb, configWebPro, configMobile];
+const configWebProSelfhosted: Configuration = {
+  ...config,
+  module: {
+    ...config.module,
+    rules: [
+      ...(config?.module?.rules || []),
+      {
+        test: path.resolve(__dirname, 'src/basic/Main.tsx'),
+        loader: 'file-replace-loader',
+        options: {
+          condition: 'if-replacement-exists',
+          replacement: path.resolve(__dirname, 'src/pro/Main.tsx'),
+          async: true,
+        },
+      },
+      {
+        test: path.resolve(__dirname, 'src/models/Settings.default.basic.ts'),
+        loader: 'file-replace-loader',
+        options: {
+          condition: 'if-replacement-exists',
+          replacement: path.resolve(__dirname, 'src/models/Settings.default.pro.selfhosted.ts'),
+          async: true,
+        },
+      },
+    ],
+  },
+  output: {
+    path: path.resolve(__dirname, 'static/frontend'),
+    filename: 'pro.selfhosted.js',
+  },
+};
+
+const configMobile: Configuration = {
+  ...config,
+  module: {
+    ...config.module,
+    rules: [
+      ...(config?.module?.rules || []),
+      {
+        test: path.resolve(__dirname, 'src/i18n/Web.js'),
+        loader: 'file-replace-loader',
+        options: {
+          condition: 'if-replacement-exists',
+          replacement: path.resolve(__dirname, 'src/i18n/Native.js'),
+          async: true,
+        },
+      },
+      {
+        test: path.resolve(__dirname, 'src/geo/Web.js'),
+        loader: 'file-replace-loader',
+        options: {
+          condition: 'if-replacement-exists',
+          replacement: path.resolve(__dirname, 'src/geo/Native.js'),
+          async: true,
+        },
+      },
+      {
+        test: path.resolve(__dirname, 'src/components/RobotAvatar/placeholder.json'),
+        loader: 'file-replace-loader',
+        options: {
+          condition: 'if-replacement-exists',
+          replacement: path.resolve(
+            __dirname,
+            'src/components/RobotAvatar/placeholder_highres.json',
+          ),
+          async: true,
+        },
+      },
+    ],
+  },
+  plugins: [
+    new CopyPlugin({
+      patterns: [
+        {
+          from: path.resolve(__dirname, 'static/css'),
+          to: path.resolve(__dirname, '../mobile/html/Web.bundle/css'),
+        },
+        {
+          from: path.resolve(__dirname, 'static/assets/sounds'),
+          to: path.resolve(__dirname, '../mobile/html/Web.bundle/assets/sounds'),
+        },
+      ],
+    }),
+  ],
+  output: {
+    path: path.resolve(__dirname, '../mobile/html/Web.bundle/js'),
+    filename: 'main.js',
+  },
+};
+
+export default [configWeb, configWebPro, configWebSelfhosted, configWebProSelfhosted, configMobile];

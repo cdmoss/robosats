@@ -6,6 +6,8 @@ on:
     tags:
       - "v*.*.*"
 
+permissions: write-all
+
 jobs:
   check-versions:
     runs-on: ubuntu-latest
@@ -13,7 +15,7 @@ jobs:
       semver: ${{ steps.validate.outputs.semver }}
     steps:
     - name: 'Checkout'
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: 'Validate versions match (tag, backend, frontend, Android)'
       id: validate
       shell: bash
@@ -36,8 +38,8 @@ jobs:
         fi
 
 
-  django-test:
-    uses: RoboSats/robosats/.github/workflows/django-test.yml@main
+  integration-tests:
+    uses: RoboSats/robosats/.github/workflows/integration-tests.yml@main
     needs: check-versions
 
   frontend-build:
@@ -48,13 +50,20 @@ jobs:
 
   coordinator-image:
     uses: RoboSats/robosats/.github/workflows/coordinator-image.yml@main
-    needs: [django-test, frontend-build]
+    needs: [frontend-build] # django-test,
     secrets: inherit
     with:
       semver: ${{ needs.check-versions.outputs.semver }}
 
-  client-image:
-    uses: RoboSats/robosats/.github/workflows/client-image.yml@main
+  selfhosted-client-image:
+    uses: RoboSats/robosats/.github/workflows/selfhosted-client-image.yml@main
+    needs: frontend-build
+    secrets: inherit
+    with:
+      semver: ${{ needs.check-versions.outputs.semver }}
+
+  web-client-image:
+    uses: RoboSats/robosats/.github/workflows/web-client-image.yml@main
     needs: frontend-build
     secrets: inherit
     with:
@@ -67,13 +76,11 @@ jobs:
       semver: ${{ needs.check-versions.outputs.semver }}
 
   release:
-    permissions:
-      contents: write
     needs: [check-versions, coordinator-image, client-image, android-build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Release
         id: create-release
         uses: softprops/action-gh-release@v1
@@ -83,7 +90,7 @@ jobs:
 
       # Upload app-universal-release APK artifact asset
       - name: 'Download universal APK Artifact'
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: robosats-${{ needs.check-versions.outputs.semver }}-universal.apk
           path: .
@@ -100,7 +107,7 @@ jobs:
 
       # Upload app-arm64-v8a-release APK artifact asset
       - name: 'Download arm64-v8a APK Artifact'
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: robosats-${{ needs.check-versions.outputs.semver }}-arm64-v8a.apk
           path: .
@@ -117,7 +124,7 @@ jobs:
 
       # Upload app-armeabi-v7a-release APK artifact asset
       - name: 'Download armeabi-v7a APK Artifact'
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: robosats-${{ needs.check-versions.outputs.semver }}-armeabi-v7a.apk
           path: .
@@ -134,7 +141,7 @@ jobs:
 
       # Upload app-x86_64-release APK artifact asset
       - name: 'Download x86_64 APK Artifact'
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: robosats-${{ needs.check-versions.outputs.semver }}-x86_64.apk
           path: .
@@ -151,7 +158,7 @@ jobs:
 
       # Upload app-x86-release APK artifact asset
       - name: 'Download x86 APK Artifact'
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: robosats-${{ needs.check-versions.outputs.semver }}-x86.apk
           path: .

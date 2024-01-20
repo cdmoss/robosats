@@ -98,15 +98,9 @@ def send_devfund_donation(order_id, proceeds, reason):
 
     from api.lightning.node import LNNode
     from api.models import LNPayment, Order
+    from api.utils import get_devfund_pubkey
 
-    if config("NETWORK", cast=str) == "testnet":
-        target_pubkey = (
-            "03ecb271b3e2e36f2b91c92c65bab665e5165f8cdfdada1b5f46cfdd3248c87fd6"
-        )
-    else:
-        target_pubkey = (
-            "0282eb467bc073833a039940392592bf10cf338a830ba4e392c1667d7697654c7e"
-        )
+    target_pubkey = get_devfund_pubkey(config("NETWORK", cast=str))
 
     order = Order.objects.get(id=order_id)
     coordinator_alias = config("COORDINATOR_ALIAS", cast=str, default="NoAlias")
@@ -123,7 +117,7 @@ def send_devfund_donation(order_id, proceeds, reason):
     if not valid:
         return False
 
-    LNPayment.objects.create(
+    lnpayment = LNPayment.objects.create(
         concept=LNPayment.Concepts.DEVDONAT,
         type=LNPayment.Types.KEYS,
         sender=User.objects.get(
@@ -137,6 +131,9 @@ def send_devfund_donation(order_id, proceeds, reason):
         **keysend_payment,
     )
 
+    order.log(
+        f"Development fund donation LNPayment({lnpayment.payment_hash},{str(lnpayment)}) was made via keysend for {num_satoshis} Sats"
+    )
     return True
 
 
@@ -209,7 +206,6 @@ def payments_cleansing():
     soft_time_limit=115,
 )
 def cache_market():
-
     import math
 
     from django.utils import timezone
@@ -229,7 +225,6 @@ def cache_market():
         for i in range(
             len(Currency.currency_dict.values())
         ):  # currencies are indexed starting at 1 (USD)
-
             rate = exchange_rates[i]
             results[i] = {currency_codes[i], rate}
 
@@ -258,7 +253,6 @@ def cache_market():
 
 @shared_task(name="send_notification", ignore_result=True, time_limit=120)
 def send_notification(order_id=None, chat_message_id=None, message=None):
-
     if order_id:
         from api.models import Order
 

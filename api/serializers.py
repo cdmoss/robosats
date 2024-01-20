@@ -4,8 +4,12 @@ from rest_framework import serializers
 from .models import MarketTick, Order
 
 RETRY_TIME = int(config("RETRY_TIME"))
-MIN_PUBLIC_ORDER_DURATION_SECS = 60 * 60 * float(config("MIN_PUBLIC_ORDER_DURATION"))
-MAX_PUBLIC_ORDER_DURATION_SECS = 60 * 60 * float(config("MAX_PUBLIC_ORDER_DURATION"))
+
+
+class VersionSerializer(serializers.Serializer):
+    major = serializers.IntegerField()
+    minor = serializers.IntegerField()
+    patch = serializers.IntegerField()
 
 
 class InfoSerializer(serializers.Serializer):
@@ -14,7 +18,7 @@ class InfoSerializer(serializers.Serializer):
     book_liquidity = serializers.IntegerField(
         help_text="Total amount of BTC in the order book"
     )
-    active_robots_today = serializers.CharField()
+    active_robots_today = serializers.IntegerField()
     last_day_nonkyc_btc_premium = serializers.FloatField(
         help_text="Average premium (weighted by volume) of the orders in the last 24h"
     )
@@ -25,6 +29,7 @@ class InfoSerializer(serializers.Serializer):
         help_text="Total volume in BTC since exchange's inception"
     )
     lnd_version = serializers.CharField()
+    cln_version = serializers.CharField()
     robosats_running_commit_hash = serializers.CharField()
     alternative_site = serializers.CharField()
     alternative_name = serializers.CharField()
@@ -37,6 +42,17 @@ class InfoSerializer(serializers.Serializer):
     current_swap_fee_rate = serializers.FloatField(
         help_text="Swap fees to perform on-chain transaction (percent)"
     )
+    version = VersionSerializer()
+    notice_severity = serializers.ChoiceField(
+        choices=[
+            ("none", "none"),
+            ("warning", "warning"),
+            ("success", "success"),
+            ("error", "error"),
+            ("info", "info"),
+        ]
+    )
+    notice_message = serializers.CharField()
 
 
 class ListOrderSerializer(serializers.ModelSerializer):
@@ -61,19 +77,30 @@ class ListOrderSerializer(serializers.ModelSerializer):
             "taker",
             "escrow_duration",
             "bond_size",
+            "latitude",
+            "longitude",
         )
 
 
 # Only used in oas_schemas
 class SummarySerializer(serializers.Serializer):
-    sent_fiat = serializers.IntegerField(
+    sent_fiat = serializers.FloatField(
         required=False, help_text="same as `amount` (only for buyer)"
+    )
+    received_fiat = serializers.FloatField(
+        required=False, help_text="same as `amount` (only for seller)"
+    )
+    sent_sats = serializers.IntegerField(
+        required=False, help_text="The total sats you sent (only for seller)"
     )
     received_sats = serializers.IntegerField(
         required=False, help_text="same as `trade_satoshis` (only for buyer)"
     )
     is_swap = serializers.BooleanField(
         required=False, help_text="True if the payout was on-chain (only for buyer)"
+    )
+    is_buyer = serializers.BooleanField(
+        required=False, help_text="True if the robot is the order buyer"
     )
     received_onchain_sats = serializers.IntegerField(
         required=False,
@@ -91,15 +118,34 @@ class SummarySerializer(serializers.Serializer):
         required=False,
         help_text="same as `swap_fee_rate` (only for buyer and if `is_swap` is `true`",
     )
-    sent_sats = serializers.IntegerField(
-        required=False, help_text="The total sats you sent (only for seller)"
+    bond_size_sats = serializers.IntegerField(
+        required=False, help_text="The amount of Satoshis at stake"
     )
-    received_fiat = serializers.IntegerField(
-        required=False, help_text="same as `amount` (only for seller)"
+    bond_size_percent = serializers.FloatField(
+        required=False, help_text="The relative size of Satoshis at stake"
     )
     trade_fee_sats = serializers.IntegerField(
         required=False,
-        help_text="Exchange fees in sats (Does not include swap fee and miner fee)",
+        help_text="Exchange fees in sats (does not include swap fee and miner fee)",
+    )
+    trade_fee_percent = serializers.FloatField(
+        required=False,
+        help_text="Exchange fees in percent (does not include swap fee and miner fee)",
+    )
+    payment_hash = serializers.CharField(
+        required=False, help_text="The payment_hash of the payout invoice"
+    )
+    preimage = serializers.CharField(
+        required=False,
+        help_text="The preimage of the payout invoice (proof of payment)",
+    )
+    address = serializers.CharField(
+        required=False,
+        help_text="The address of the payout if on-the-fly swap was selected",
+    )
+    txid = serializers.CharField(
+        required=False,
+        help_text="The transaction hash of the payout if on-the-fly swap was selected",
     )
 
 
@@ -119,6 +165,13 @@ class PlatformSummarySerializer(serializers.Serializer):
     )
     trade_revenue_sats = serializers.IntegerField(
         required=False, help_text="The sats the exchange earned from the trade"
+    )
+    routing_budget_sats = serializers.FloatField(
+        required=False, help_text="The budget allocated for routing costs in Satoshis"
+    )
+    contract_exchange_rate = serializers.FloatField(
+        required=False,
+        help_text="The exchange rate applied to this contract. Taken from externals APIs exactly when the taker bond was locked.",
     )
 
 
@@ -152,18 +205,25 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         "- **'Inactive'** (seen more than 10 min ago)\n\n"
         "Note: When you make a request to this route, your own status get's updated and can be seen by your counterparty",
     )
-    taker_status = serializers.BooleanField(
+    taker_status = serializers.CharField(
         required=False,
-        help_text="True if you are either a taker or maker, False otherwise",
+        help_text="Status of the maker:\n"
+        "- **'Active'** (seen within last 2 min)\n"
+        "- **'Seen Recently'** (seen within last 10 min)\n"
+        "- **'Inactive'** (seen more than 10 min ago)\n\n"
+        "Note: When you make a request to this route, your own status get's updated and can be seen by your counterparty",
     )
-    price_now = serializers.IntegerField(
+    price_now = serializers.FloatField(
         required=False,
         help_text="Price of the order in the order's currency at the time of request (upto 5 significant digits)",
     )
-    premium = serializers.IntegerField(
+    premium = serializers.CharField(
+        required=False, help_text="Premium over the CEX price set by the maker"
+    )
+    premium_now = serializers.FloatField(
         required=False, help_text="Premium over the CEX price at the current time"
     )
-    premium_percentile = serializers.IntegerField(
+    premium_percentile = serializers.FloatField(
         required=False,
         help_text="(Only if `is_maker`) Premium percentile of your order compared to other public orders in the same currency currently in the order book",
     )
@@ -194,8 +254,14 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     maker_nick = serializers.CharField(
         required=False, help_text="Nickname (Robot name) of the maker"
     )
+    maker_hash_id = serializers.CharField(
+        required=False, help_text="The maker's robot hash"
+    )
     taker_nick = serializers.CharField(
-        required=False, help_text="Nickname (Robot name) of the taker"
+        required=False, help_text="The taker's robot hash"
+    )
+    taker_hash_id = serializers.CharField(
+        required=False, help_text="The taker's robot hash"
     )
     status_message = serializers.CharField(
         required=False,
@@ -208,7 +274,6 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         required=False, help_text="Whether or not the counterparty raised a dispute"
     )
     ur_nick = serializers.CharField(required=False, help_text="Your Nickname")
-    ur_nick = serializers.CharField(required=False, help_text="Your Nick")
     maker_locked = serializers.BooleanField(
         required=False, help_text="True if maker bond is locked, False otherwise"
     )
@@ -246,12 +311,20 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     swap_failure_reason = serializers.CharField(
         required=False, help_text="Reason for why on-chain swap is not available"
     )
-    suggested_mining_fee_rate = serializers.IntegerField(
+    suggested_mining_fee_rate = serializers.FloatField(
         required=False, help_text="fee in sats/vbyte for the on-chain swap"
     )
     swap_fee_rate = serializers.FloatField(
         required=False,
         help_text="in percentage, the swap fee rate the platform charges",
+    )
+    latitude = serializers.FloatField(
+        required=False,
+        help_text="Latitude of the order for F2F payments",
+    )
+    longitude = serializers.FloatField(
+        required=False,
+        help_text="Longitude of the order for F2F payments",
     )
     pending_cancel = serializers.BooleanField(
         required=False,
@@ -292,7 +365,11 @@ class OrderDetailSerializer(serializers.ModelSerializer):
     )
     maker_summary = SummarySerializer(required=False)
     taker_summary = SummarySerializer(required=False)
-    platform_summary = PlatformSummarySerializer(required=True)
+    satoshis_now = serializers.IntegerField(
+        required=False,
+        help_text="Maximum size of the order right now in Satoshis",
+    )
+    platform_summary = PlatformSummarySerializer(required=False)
     expiry_message = serializers.CharField(
         required=False,
         help_text="The reason the order expired (message associated with the `expiry_reason`)",
@@ -313,6 +390,10 @@ class OrderDetailSerializer(serializers.ModelSerializer):
         required=False,
         help_text="The network eg. 'testnet', 'mainnet'. Only if status = `14` (Successful Trade) and is_buyer = `true`",
     )
+    chat_last_index = serializers.IntegerField(
+        required=False,
+        help_text="The index of the last message sent in the trade chatroom",
+    )
 
     class Meta:
         model = Order
@@ -330,7 +411,9 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "payment_method",
             "is_explicit",
             "premium",
+            "premium_now",
             "satoshis",
+            "satoshis_now",
             "maker",
             "taker",
             "escrow_duration",
@@ -342,7 +425,6 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "maker_status",
             "taker_status",
             "price_now",
-            "premium",
             "premium_percentile",
             "num_similar_orders",
             "tg_enabled",
@@ -351,7 +433,9 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "is_buyer",
             "is_seller",
             "maker_nick",
+            "maker_hash_id",
             "taker_nick",
+            "taker_hash_id",
             "status_message",
             "is_fiat_sent",
             "is_disputed",
@@ -391,11 +475,15 @@ class OrderDetailSerializer(serializers.ModelSerializer):
             "sent_satoshis",
             "txid",
             "network",
+            "latitude",
+            "longitude",
+            "chat_last_index",
         )
 
 
 class OrderPublicSerializer(serializers.ModelSerializer):
     maker_nick = serializers.CharField(required=False)
+    maker_hash_id = serializers.CharField(required=False)
     maker_status = serializers.CharField(
         help_text='Status of the nick - "Active" or "Inactive"', required=False
     )
@@ -425,11 +513,14 @@ class OrderPublicSerializer(serializers.ModelSerializer):
             "satoshis",
             "maker",
             "maker_nick",
+            "maker_hash_id",
             "maker_status",
             "price",
             "escrow_duration",
             "satoshis_now",
             "bond_size",
+            "latitude",
+            "longitude",
         )
 
 
@@ -469,6 +560,8 @@ class MakeOrderSerializer(serializers.ModelSerializer):
             "public_duration",
             "escrow_duration",
             "bond_size",
+            "latitude",
+            "longitude",
         )
 
 
@@ -527,64 +620,6 @@ class UpdateOrderSerializer(serializers.Serializer):
     )
 
 
-class UserGenSerializer(serializers.Serializer):
-    # Mandatory fields
-    token_sha256 = serializers.CharField(
-        min_length=64,
-        max_length=64,
-        allow_null=False,
-        allow_blank=False,
-        required=True,
-        help_text="SHA256 of user secret",
-    )
-    # Optional fields
-    # (PGP keys are mandatory for new users, but optional for logins)
-    public_key = serializers.CharField(
-        max_length=2000,
-        allow_null=False,
-        allow_blank=False,
-        required=False,
-        help_text="Armored ASCII PGP public key block",
-    )
-    encrypted_private_key = serializers.CharField(
-        max_length=2000,
-        allow_null=False,
-        allow_blank=False,
-        required=False,
-        help_text="Armored ASCII PGP encrypted private key block",
-    )
-
-    ref_code = serializers.CharField(
-        max_length=30,
-        allow_null=True,
-        allow_blank=True,
-        required=False,
-        default=None,
-        help_text="Referal code",
-    )
-    counts = serializers.ListField(
-        child=serializers.IntegerField(),
-        allow_null=True,
-        required=False,
-        default=None,
-        help_text="Counts of the unique characters in the token",
-    )
-    length = serializers.IntegerField(
-        allow_null=True,
-        default=None,
-        required=False,
-        min_value=1,
-        help_text="Length of the token",
-    )
-    unique_values = serializers.IntegerField(
-        allow_null=True,
-        default=None,
-        required=False,
-        min_value=1,
-        help_text="Number of unique values in the token",
-    )
-
-
 class ClaimRewardSerializer(serializers.Serializer):
     invoice = serializers.CharField(
         max_length=2000,
@@ -610,7 +645,7 @@ class TickSerializer(serializers.ModelSerializer):
             "premium",
             "fee",
         )
-        depth = 1
+        depth = 0
 
 
 class StealthSerializer(serializers.Serializer):

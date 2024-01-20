@@ -1,2 +1,15 @@
-[tool.isort]
-profile = "black"
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    "*migrations/*",
+    "api/nick_generator/nick_generator.py",
+    ]
+
+[tool.coverage.run]
+omit = [
+    # omit grpc proto from coverage reports
+    "api/lightning/*pb2*",
+    # omit test and mocks from coverage reports
+    "tests/*",
+    "manage.py",
+    ]

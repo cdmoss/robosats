@@ -29,7 +29,7 @@ import { type LimitList, defaultMaker } from '../../models';
 
 import { LocalizationProvider, MobileTimePicker } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
-import { ConfirmationDialog } from '../Dialogs';
+import { ConfirmationDialog, F2fMapDialog } from '../Dialogs';
 import { apiClient } from '../../services/api';
 
 import { FlagWithProps } from '../Icons';
@@ -38,9 +38,10 @@ import AmountRange from './AmountRange';
 import currencyDict from '../../../static/assets/currencies.json';
 import { amountToString, computeSats, pn } from '../../utils';
 
-import { SelfImprovement, Lock, HourglassTop, DeleteSweep, Edit } from '@mui/icons-material';
+import { SelfImprovement, Lock, HourglassTop, DeleteSweep, Edit, Map } from '@mui/icons-material';
 import { LoadingButton } from '@mui/lab';
 import { AppContext, type UseAppStoreType } from '../../contexts/AppContext';
+import { fiatMethods } from '../PaymentMethods';
 
 interface MakerFormProps {
   disableRequest?: boolean;
@@ -76,6 +77,7 @@ const MakerForm = ({
   const [currencyCode, setCurrencyCode] = useState<string>('USD');
 
   const [openDialogs, setOpenDialogs] = useState<boolean>(false);
+  const [openWorldmap, setOpenWorldmap] = useState<boolean>(false);
   const [submittingRequest, setSubmittingRequest] = useState<boolean>(false);
   const [amountRangeEnabled, setAmountRangeEnabled] = useState<boolean>(true);
 
@@ -140,11 +142,20 @@ const MakerForm = ({
     updateCurrentPrice(limits.list, newCurrency, maker.premium);
 
     if (makerHasAmountRange) {
-      setMaker({
-        ...maker,
-        minAmount: parseFloat(Number(limits.list[newCurrency].max_amount * 0.25).toPrecision(2)),
-        maxAmount: parseFloat(Number(limits.list[newCurrency].max_amount * 0.75).toPrecision(2)),
-      });
+      const minAmount = parseFloat(Number(limits.list[newCurrency].min_amount).toPrecision(2));
+      const maxAmount = parseFloat(Number(limits.list[newCurrency].max_amount).toPrecision(2));
+      if (
+        parseFloat(maker.minAmount) < minAmount ||
+        parseFloat(maker.minAmount) > maxAmount ||
+        parseFloat(maker.maxAmount) > maxAmount ||
+        parseFloat(maker.maxAmount) < minAmount
+      ) {
+        setMaker({
+          ...maker,
+          minAmount: (maxAmount * 0.25).toPrecision(2),
+          maxAmount: (maxAmount * 0.75).toPrecision(2),
+        });
+      }
     }
   };
 
@@ -152,18 +163,30 @@ const MakerForm = ({
     return maker.advancedOptions && amountRangeEnabled;
   }, [maker.advancedOptions, amountRangeEnabled]);
 
-  const handlePaymentMethodChange = function (paymentArray: string[]) {
+  const handlePaymentMethodChange = function (paymentArray: { name: string; icon: string }[]) {
+    let includeCoordinates = false;
     let str = '';
     const arrayLength = paymentArray.length;
+
     for (let i = 0; i < arrayLength; i++) {
       str += paymentArray[i].name + ' ';
+      if (paymentArray[i].icon === 'cash') {
+        includeCoordinates = true;
+        if (i === arrayLength - 1) {
+          setOpenWorldmap(true);
+        }
+      }
     }
     const paymentMethodText = str.slice(0, -1);
-    setMaker({
-      ...maker,
-      paymentMethods: paymentArray,
-      paymentMethodsText: paymentMethodText,
-      badPaymentMethod: paymentMethodText.length > 50,
+    setMaker((maker) => {
+      return {
+        ...maker,
+        paymentMethods: paymentArray,
+        paymentMethodsText: paymentMethodText,
+        badPaymentMethod: paymentMethodText.length > 50,
+        latitude: includeCoordinates ? maker.latitude : null,
+        longitude: includeCoordinates ? maker.longitude : null,
+      };
     });
   };
 
@@ -258,6 +281,8 @@ const MakerForm = ({
         public_duration: maker.publicDuration,
         escrow_duration: maker.escrowDuration,
         bond_size: maker.bondSize,
+        latitude: maker.latitude,
+        longitude: maker.longitude,
       };
       apiClient
         .post(baseUrl, '/api/make/', body, { tokenSHA256: robot.tokenSHA256 })
@@ -437,6 +462,26 @@ const MakerForm = ({
     setMaker(defaultMaker);
   };
 
+  const handleAddLocation = (pos: [number, number]) => {
+    if (pos && pos.length === 2) {
+      setMaker((maker) => {
+        return {
+          ...maker,
+          latitude: parseFloat(pos[0].toPrecision(6)),
+          longitude: parseFloat(pos[1].toPrecision(6)),
+        };
+      });
+      if (!maker.paymentMethods.find((method) => method.icon === 'cash')) {
+        const newMethods = maker.paymentMethods;
+        const cash = fiatMethods.find((method) => method.icon === 'cash');
+        if (cash) {
+          newMethods.unshift(cash);
+          handlePaymentMethodChange(newMethods);
+        }
+      }
+    }
+  };
+
   const SummaryText = function () {
     return (
       <Typography
@@ -450,12 +495,12 @@ const MakerForm = ({
             ? t('Order for ')
             : t('Swap of ')
           : fav.type == 1
-          ? fav.mode === 'fiat'
-            ? t('Buy BTC for ')
-            : t('Swap into LN ')
-          : fav.mode === 'fiat'
-          ? t('Sell BTC for ')
-          : t('Swap out of LN ')}
+            ? fav.mode === 'fiat'
+              ? t('Buy BTC for ')
+              : t('Swap into LN ')
+            : fav.mode === 'fiat'
+              ? t('Sell BTC for ')
+              : t('Swap out of LN ')}
         {fav.mode === 'fiat'
           ? amountToString(maker.amount, makerHasAmountRange, maker.minAmount, maker.maxAmount)
           : amountToString(
@@ -468,12 +513,12 @@ const MakerForm = ({
         {maker.isExplicit
           ? t(' of {{satoshis}} Satoshis', { satoshis: pn(maker.satoshis) })
           : maker.premium == 0
-          ? fav.mode === 'fiat'
-            ? t(' at market price')
-            : ''
-          : maker.premium > 0
-          ? t(' at a {{premium}}% premium', { premium: maker.premium })
-          : t(' at a {{discount}}% discount', { discount: -maker.premium })}
+            ? fav.mode === 'fiat'
+              ? t(' at market price')
+              : ''
+            : maker.premium > 0
+              ? t(' at a {{premium}}% premium', { premium: maker.premium })
+              : t(' at a {{discount}}% discount', { discount: -maker.premium })}
       </Typography>
     );
   };
@@ -488,6 +533,21 @@ const MakerForm = ({
         onClickDone={handleCreateOrder}
         hasRobot={robot.avatarLoaded}
         onClickGenerateRobot={onClickGenerateRobot}
+      />
+      <F2fMapDialog
+        interactive
+        latitude={maker.latitude}
+        longitude={maker.longitude}
+        open={openWorldmap}
+        message={t(
+          'To protect your privacy, the exact location you pin will be slightly randomized.',
+        )}
+        orderType={fav.type || 0}
+        onClose={(pos?: [number, number]) => {
+          if (pos) handleAddLocation(pos);
+          setOpenWorldmap(false);
+        }}
+        zoom={maker.latitude && maker.longitude ? 6 : undefined}
       />
       <Collapse in={limits.list.length == 0}>
         <div style={{ display: limits.list.length == 0 ? '' : 'none' }}>
@@ -679,10 +739,10 @@ const MakerForm = ({
                                 minAmount: pn(parseFloat(amountLimits[0].toPrecision(2))),
                               })
                             : maker.amount > amountLimits[1] && maker.amount != ''
-                            ? t('Must be less than {{maxAmount}}', {
-                                maxAmount: pn(parseFloat(amountLimits[1].toPrecision(2))),
-                              })
-                            : null
+                              ? t('Must be less than {{maxAmount}}', {
+                                  maxAmount: pn(parseFloat(amountLimits[1].toPrecision(2))),
+                                })
+                              : null
                         }
                         label={amountLabel.label}
                         required={true}
@@ -746,6 +806,7 @@ const MakerForm = ({
           <Grid item xs={12}>
             <AutocompletePayments
               onAutocompleteChange={handlePaymentMethodChange}
+              onClick={() => setOpenWorldmap(true)}
               optionsType={fav.mode}
               error={maker.badPaymentMethod}
               helperText={maker.badPaymentMethod ? t('Must be shorter than 65 characters') : ''}
@@ -760,13 +821,37 @@ const MakerForm = ({
               asFilter={false}
               value={maker.paymentMethods}
             />
-
             {maker.badPaymentMethod && (
               <FormHelperText error={true}>
                 {t('Must be shorter than 65 characters')}
               </FormHelperText>
             )}
           </Grid>
+
+          {fav.mode === 'fiat' && (
+            <Grid item sx={{ width: '100%' }}>
+              <Tooltip enterTouchDelay={0} title={t('Add geolocation for a face to face trade')}>
+                <Button
+                  size='large'
+                  fullWidth={true}
+                  color='inherit'
+                  variant='outlined'
+                  sx={{
+                    justifyContent: 'flex-start',
+                    fontWeight: 'normal',
+                    textTransform: 'none',
+                    backgroundColor: theme.palette.background.paper,
+                    color: theme.palette.text.secondary,
+                    borderColor: theme.palette.text.disabled,
+                  }}
+                  onClick={() => setOpenWorldmap(true)}
+                >
+                  {t('Face to Face Location')}
+                  <Map style={{ paddingLeft: 5 }} />
+                </Button>
+              </Tooltip>
+            </Grid>
+          )}
 
           {!maker.advancedOptions && pricingMethods ? (
             <Grid item xs={12}>

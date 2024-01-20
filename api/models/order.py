@@ -1,6 +1,8 @@
+# We use custom seeded UUID generation during testing
 import uuid
 
 from decouple import config
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -8,9 +10,18 @@ from django.db.models.signals import pre_delete
 from django.dispatch import receiver
 from django.utils import timezone
 
-MIN_TRADE = config("MIN_TRADE", cast=int, default=20_000)
-MAX_TRADE = config("MAX_TRADE", cast=int, default=1_000_000)
-FIAT_EXCHANGE_DURATION = config("FIAT_EXCHANGE_DURATION", cast=int, default=24)
+if config("TESTING", cast=bool, default=False):
+    import random
+    import string
+
+    random.seed(1)
+    chars = string.ascii_lowercase + string.digits
+
+    def custom_uuid():
+        return uuid.uuid5(uuid.NAMESPACE_DNS, "".join(random.choices(chars, k=20)))
+
+else:
+    custom_uuid = uuid.uuid4
 
 
 class Order(models.Model):
@@ -47,7 +58,7 @@ class Order(models.Model):
         NESINV = 4, "Neither escrow locked or invoice submitted"
 
     # order info
-    reference = models.UUIDField(default=uuid.uuid4, editable=False)
+    reference = models.UUIDField(default=custom_uuid, editable=False)
     status = models.PositiveSmallIntegerField(
         choices=Status.choices, null=False, default=Status.WFB
     )
@@ -85,20 +96,22 @@ class Order(models.Model):
     # explicit
     satoshis = models.PositiveBigIntegerField(
         null=True,
-        validators=[MinValueValidator(MIN_TRADE), MaxValueValidator(MAX_TRADE)],
+        validators=[
+            MinValueValidator(settings.MIN_TRADE),
+            MaxValueValidator(settings.MAX_TRADE),
+        ],
         blank=True,
     )
     # optionally makers can choose the public order duration length (seconds)
     public_duration = models.PositiveBigIntegerField(
-        default=60 * 60 * config("DEFAULT_PUBLIC_ORDER_DURATION", cast=int, default=24)
-        - 1,
+        default=60 * 60 * settings.DEFAULT_PUBLIC_ORDER_DURATION - 1,
         null=False,
         validators=[
             MinValueValidator(
-                60 * 60 * config("MIN_PUBLIC_ORDER_DURATION", cast=float, default=0.166)
+                60 * 60 * settings.MIN_PUBLIC_ORDER_DURATION
             ),  # Min is 10 minutes
             MaxValueValidator(
-                60 * 60 * config("MAX_PUBLIC_ORDER_DURATION", cast=float, default=24)
+                60 * 60 * settings.MAX_PUBLIC_ORDER_DURATION
             ),  # Max is 24 Hours
         ],
         blank=False,
@@ -106,7 +119,7 @@ class Order(models.Model):
 
     # optionally makers can choose the escrow lock / invoice submission step length (seconds)
     escrow_duration = models.PositiveBigIntegerField(
-        default=60 * int(config("INVOICE_AND_ESCROW_DURATION")) - 1,
+        default=60 * settings.INVOICE_AND_ESCROW_DURATION - 1,
         null=False,
         validators=[
             MinValueValidator(60 * 30),  # Min is 30 minutes
@@ -119,24 +132,49 @@ class Order(models.Model):
     bond_size = models.DecimalField(
         max_digits=4,
         decimal_places=2,
-        default=config("DEFAULT_BOND_SIZE", cast=float, default=3),
+        default=settings.DEFAULT_BOND_SIZE,
         null=False,
         validators=[
-            MinValueValidator(config("MIN_BOND_SIZE", cast=float, default=1)),  # 1  %
-            MaxValueValidator(config("MAX_BOND_SIZE", cast=float, default=1)),  # 15 %
+            MinValueValidator(settings.MIN_BOND_SIZE),  # 2  %
+            MaxValueValidator(settings.MAX_BOND_SIZE),  # 15 %
         ],
         blank=False,
+    )
+
+    # optionally makers can choose a coordinate for F2F
+    latitude = models.DecimalField(
+        max_digits=8,
+        decimal_places=6,
+        null=True,
+        validators=[
+            MinValueValidator(-90),
+            MaxValueValidator(90),
+        ],
+        blank=True,
+    )
+    longitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        validators=[
+            MinValueValidator(-180),
+            MaxValueValidator(180),
+        ],
+        blank=True,
     )
 
     # how many sats at creation and at last check (relevant for marked to market)
     t0_satoshis = models.PositiveBigIntegerField(
         null=True,
-        validators=[MinValueValidator(MIN_TRADE), MaxValueValidator(MAX_TRADE)],
+        validators=[
+            MinValueValidator(settings.MIN_TRADE),
+            MaxValueValidator(settings.MAX_TRADE),
+        ],
         blank=True,
     )  # sats at creation
     last_satoshis = models.PositiveBigIntegerField(
         null=True,
-        validators=[MinValueValidator(0), MaxValueValidator(MAX_TRADE * 2)],
+        validators=[MinValueValidator(0), MaxValueValidator(settings.MAX_TRADE * 2)],
         blank=True,
     )  # sats last time checked. Weird if 2* trade max...
     # timestamp of last_satoshis
@@ -235,6 +273,14 @@ class Order(models.Model):
     maker_platform_rated = models.BooleanField(default=False, null=False)
     taker_platform_rated = models.BooleanField(default=False, null=False)
 
+    logs = models.TextField(
+        max_length=80_000,
+        null=True,
+        default="<thead><tr><b><th>Timestamp</th><th>Level</th><th>Event</th></b></tr></thead>",
+        blank=True,
+        editable=False,
+    )
+
     def __str__(self):
         if self.has_range and self.amount is None:
             amt = str(float(self.min_amount)) + "-" + str(float(self.max_amount))
@@ -243,7 +289,6 @@ class Order(models.Model):
         return f"Order {self.id}: {self.Types(self.type).label} BTC for {amt} {self.currency}"
 
     def t_to_expire(self, status):
-
         t_to_expire = {
             0: config(
                 "EXP_MAKER_BOND_INVOICE", cast=int, default=300
@@ -260,8 +305,10 @@ class Order(models.Model):
             ),  # 'Waiting for trade collateral and buyer invoice'
             7: int(self.escrow_duration),  # 'Waiting only for seller trade collateral'
             8: int(self.escrow_duration),  # 'Waiting only for buyer invoice'
-            9: 60 * 60 * FIAT_EXCHANGE_DURATION,  # 'Sending fiat - In chatroom'
-            10: 60 * 60 * FIAT_EXCHANGE_DURATION,  # 'Fiat sent - In chatroom'
+            9: 60
+            * 60
+            * settings.FIAT_EXCHANGE_DURATION,  # 'Sending fiat - In chatroom'
+            10: 60 * 60 * settings.FIAT_EXCHANGE_DURATION,  # 'Fiat sent - In chatroom'
             11: 1 * 24 * 60 * 60,  # 'In dispute'
             12: 0,  # 'Collaboratively cancelled'
             13: 100 * 24 * 60 * 60,  # 'Sending satoshis to buyer'
@@ -273,6 +320,34 @@ class Order(models.Model):
         }
 
         return t_to_expire[status]
+
+    def log(self, event="empty event", level="INFO"):
+        """
+        log() adds a new line to the Order.log field. We wrap it all in a
+        try/catch block since this function is called inside the main request->response
+        pipe and any error here would lead to a 500 response.
+        """
+        if config("DISABLE_ORDER_LOGS", cast=bool, default=True):
+            return
+        try:
+            timestamp = timezone.now().replace(microsecond=0).isoformat()
+            level_in_tag = "" if level == "INFO" else "<b>"
+            level_out_tag = "" if level == "INFO" else "</b>"
+            self.logs = (
+                self.logs
+                + f"<tr><td>{timestamp}</td><td>{level_in_tag}{level}{level_out_tag}</td><td>{event}</td></tr>"
+            )
+            self.save(update_fields=["logs"])
+        except Exception:
+            pass
+
+    def update_status(self, new_status):
+        old_status = self.status
+        self.status = new_status
+        self.save(update_fields=["status"])
+        self.log(
+            f"Order state went from {old_status}: <i>{Order.Status(old_status).label}</i> to {new_status}: <i>{Order.Status(new_status).label}</i>"
+        )
 
 
 @receiver(pre_delete, sender=Order)
